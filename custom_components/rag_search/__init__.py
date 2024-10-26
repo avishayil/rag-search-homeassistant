@@ -16,6 +16,7 @@ CONFIG_SCHEMA = vol.Schema(
                 vol.Optional("openai_model", default="gpt-4-turbo"): cv.string,
                 vol.Required("entity_scope", default=[]): cv.ensure_list(cv.entity_id),
                 vol.Optional("max_items", default=50): cv.positive_int,
+                vol.Optional("timeout", default=15): cv.positive_int,
             }
         )
     },
@@ -27,6 +28,14 @@ async def async_setup(hass, config):
     """Set up the RAG Search component."""
     conf = config[DOMAIN]
     entity_scope = conf.get("entity_scope", [])
+    invalid_entities = [
+        entity for entity in entity_scope if not hass.states.get(entity)
+    ]
+    if invalid_entities:
+        _LOGGER.warning(
+            "Some entities in entity_scope are invalid: %s", invalid_entities
+        )
+
     hass.data[DOMAIN] = {
         "session": ClientSession(),
     }
@@ -44,7 +53,11 @@ async def async_setup(hass, config):
 
     hass.services.async_register(DOMAIN, "search_history", handle_search_history)
 
-    _LOGGER.info("Service %s.search_history registered.", DOMAIN)
+    _LOGGER.info(
+        "Service %s.search_history registered with entity scope: %s.",
+        DOMAIN,
+        entity_scope,
+    )
 
     return True
 

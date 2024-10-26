@@ -1,3 +1,6 @@
 pytest
 pytest-cov
 pytest-homeassistant-custom-component
+aiohttp>=3.8.0
+pytest-asyncio
+pre-commit

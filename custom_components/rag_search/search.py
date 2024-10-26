@@ -3,7 +3,7 @@ import aiohttp
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.components.recorder import history
 from datetime import datetime
-from aiohttp import ClientTimeout
+from aiohttp import ClientTimeout, ClientConnectionError, ClientResponseError
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -13,8 +13,9 @@ async def search_history(hass: HomeAssistant, config, call: ServiceCall):
     """Handle the service call for rag_search.search_history."""
     conf = config[DOMAIN]
     openai_model = conf.get("openai_model", "gpt-4-turbo")
-    openai_api_key = conf.get("openai_api_key", None)
+    openai_api_key = conf.get("openai_api_key")
     max_items = conf.get("max_items", 50)
+    timeout_value = conf.get("timeout", 15)
     session = hass.data[DOMAIN]["session"]
 
     # Extract start_time and end_time safely
@@ -80,12 +81,20 @@ async def search_history(hass: HomeAssistant, config, call: ServiceCall):
         "max_tokens": 150,
     }
 
+    answer = await call_openai_api(session, headers, payload, timeout_value, hass)
+    if answer:
+        result_entity_id = f"rag_search.query_result.{entity_id}"
+        hass.states.async_set(result_entity_id, answer)
+
+
+async def call_openai_api(session, headers, payload, timeout_value, hass):
+    """Helper function to call the OpenAI API."""
     try:
         async with session.post(
             "https://api.openai.com/v1/chat/completions",
             json=payload,
             headers=headers,
-            timeout=ClientTimeout(total=15),
+            timeout=ClientTimeout(total=timeout_value),
         ) as response:
             if response.status != 200:
                 _LOGGER.error(
@@ -94,7 +103,7 @@ async def search_history(hass: HomeAssistant, config, call: ServiceCall):
                 hass.states.async_set(
                     "rag_search.last_query_result", "OpenAI API error."
                 )
-                return
+                return None
 
             response_data = await response.json()
             _LOGGER.debug("Received response from OpenAI: %s", response_data)
@@ -104,12 +113,23 @@ async def search_history(hass: HomeAssistant, config, call: ServiceCall):
                 hass.states.async_set(
                     "rag_search.last_query_result", "Invalid response from OpenAI."
                 )
-                return
+                return None
 
             answer = response_data["choices"][0]["message"]["content"].strip()
             _LOGGER.info("Received response from OpenAI: %s", answer)
-            hass.states.async_set("rag_search.last_query_result", answer)
+            return answer
 
+    except ClientConnectionError as e:
+        _LOGGER.error("Connection error while calling OpenAI API: %s", e)
+        hass.states.async_set(
+            "rag_search.last_query_result",
+            "Connection error while processing the query.",
+        )
+    except ClientResponseError as e:
+        _LOGGER.error("Client error while calling OpenAI API: %s", e)
+        hass.states.async_set(
+            "rag_search.last_query_result", f"Client error: {e.message}"
+        )
     except aiohttp.ClientError as e:
         _LOGGER.error("Error while calling OpenAI API: %s", e)
         hass.states.async_set(
@@ -120,3 +140,4 @@ async def search_history(hass: HomeAssistant, config, call: ServiceCall):
         hass.states.async_set(
             "rag_search.last_query_result", "Error processing the query."
         )
+    return None
