@@ -19,6 +19,13 @@ jobs:
         uses: hacs/action@main
         with:
           category: integration
+          # This is a custom (non-default-store) integration installed by URL,
+          # so it does not ship Home Assistant brand assets and is not listed in
+          # the home-assistant/brands repository. The "license" check reads the
+          # license GitHub reports for the default branch; the MIT LICENSE lives
+          # in this repository but is only detected once it reaches the default
+          # branch. Skip both action-only checks for a custom integration.
+          ignore: brands license
 
   hassfest:
     name: Hassfest validation

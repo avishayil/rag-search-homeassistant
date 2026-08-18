@@ -3,6 +3,14 @@ pytest-cov
 pytest-homeassistant-custom-component
 aioresponses
 
+# pycares 4.9.0 added a background "_run_safe_shutdown_loop" daemon thread that
+# lingers after the aiodns resolver is torn down. The newest Home Assistant that
+# still installs on Python 3.12 (2025.1.x) predates the fix that allow-lists that
+# thread in its strict verify_cleanup fixture, so an unpinned pycares makes the
+# tests fail on teardown. Pin below 4.9 to match the resolver behaviour that
+# Home Assistant version expects.
+pycares<4.9
+
 # Required to import homeassistant.components.recorder (used by search.py).
 # The recorder integration is never started in tests, but its module must import.
 SQLAlchemy
