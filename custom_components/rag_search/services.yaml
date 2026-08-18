@@ -1,0 +1,44 @@
+search_history:
+  name: Search history
+  description: >-
+    Query an entity's recorded history over a time range and generate an
+    answer with OpenAI. The result is written to rag_search.last_query_result.
+  fields:
+    entity_id:
+      name: Entity
+      description: The entity to search (must be in the configured scope).
+      required: true
+      example: sensor.temperature
+      selector:
+        entity: {}
+    start_time:
+      name: Start time
+      description: Start of the history window (ISO 8601).
+      required: true
+      example: "2024-10-01T00:00:00Z"
+      selector:
+        text: {}
+    end_time:
+      name: End time
+      description: End of the history window (ISO 8601).
+      required: true
+      example: "2024-10-10T23:59:59Z"
+      selector:
+        text: {}
+    num_items:
+      name: Number of items
+      description: Number of history items to fetch (capped by max_items).
+      required: false
+      example: 30
+      selector:
+        number:
+          min: 1
+          max: 1000
+          mode: box
+    query:
+      name: Query
+      description: The natural-language question appended to the history.
+      required: true
+      example: What were the notable temperature changes?
+      selector:
+        text: {}

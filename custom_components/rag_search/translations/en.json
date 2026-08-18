@@ -1,0 +1,35 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "RAG Search",
+        "description": "Set up RAG Search. Your OpenAI API key is stored securely by Home Assistant and never written to configuration.yaml.",
+        "data": {
+          "openai_api_key": "OpenAI API key",
+          "openai_model": "OpenAI model",
+          "entity_scope": "Allowed entities",
+          "max_items": "Maximum history items"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid OpenAI API key.",
+      "cannot_connect": "Failed to connect to OpenAI."
+    },
+    "abort": {
+      "already_configured": "RAG Search is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "RAG Search options",
+        "data": {
+          "openai_model": "OpenAI model",
+          "entity_scope": "Allowed entities",
+          "max_items": "Maximum history items"
+        }
+      }
+    }
+  }
+}

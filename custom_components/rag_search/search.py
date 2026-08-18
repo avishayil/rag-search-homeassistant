@@ -1,122 +1,169 @@
+"""RAG history search logic for the RAG Search integration."""
+
+import asyncio
 import logging
-import aiohttp
-from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.components.recorder import history
 from datetime import datetime
-from aiohttp import ClientTimeout
-from .const import DOMAIN
+
+import aiohttp
+from homeassistant.components.recorder import get_instance, history
+from homeassistant.core import HomeAssistant, ServiceCall
+
+from .const import (
+    CONF_MAX_ITEMS,
+    CONF_OPENAI_API_KEY,
+    CONF_OPENAI_MODEL,
+    DEFAULT_MAX_ITEMS,
+    DEFAULT_MODEL,
+    DOMAIN,
+    MAX_RETRIES,
+    OPENAI_CHAT_URL,
+    OPENAI_MAX_TOKENS,
+    REQUEST_TIMEOUT,
+    RESULT_ENTITY,
+    RETRY_BACKOFF_SECONDS,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 
-async def search_history(hass: HomeAssistant, config, call: ServiceCall):
+def _parse_iso(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp, tolerating a trailing ``Z``."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _format_history(entity_id: str, history_data: dict, num_items: int) -> list[str]:
+    """Format significant-state history into human-readable lines."""
+    entries: list[str] = []
+    if entity_id in history_data:
+        latest_entries = history_data[entity_id][-num_items:]
+        for state in latest_entries:
+            entries.append(
+                f"{state.entity_id} changed to {state.state} at {state.last_changed}"
+            )
+    return entries
+
+
+async def _call_openai(
+    session: aiohttp.ClientSession, api_key: str, model: str, prompt: str
+) -> str | None:
+    """Call the OpenAI chat completions API with timeout and retries.
+
+    Returns the answer text, or ``None`` on a non-retryable failure.
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": OPENAI_MAX_TOKENS,
+    }
+    timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+
+    last_error: Exception | None = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            async with session.post(
+                OPENAI_CHAT_URL, json=payload, headers=headers, timeout=timeout
+            ) as response:
+                # 4xx (except 429) are client errors and will not succeed on
+                # retry, so fail fast.
+                if response.status == 429 or response.status >= 500:
+                    _LOGGER.warning(
+                        "OpenAI API returned retryable status %s (attempt %d/%d)",
+                        response.status,
+                        attempt,
+                        MAX_RETRIES,
+                    )
+                    last_error = RuntimeError(f"status {response.status}")
+                    await _backoff(attempt)
+                    continue
+                if response.status != 200:
+                    _LOGGER.error(
+                        "OpenAI API returned a non-200 status: %s", response.status
+                    )
+                    return None
+
+                response_data = await response.json()
+                choices = response_data.get("choices")
+                if not choices:
+                    _LOGGER.error("Invalid response from OpenAI: %s", response_data)
+                    return None
+                return choices[0]["message"]["content"].strip()
+
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            last_error = err
+            _LOGGER.warning(
+                "Error calling OpenAI API (attempt %d/%d): %s",
+                attempt,
+                MAX_RETRIES,
+                err,
+            )
+            await _backoff(attempt)
+
+    _LOGGER.error(
+        "OpenAI API call failed after %d attempts: %s", MAX_RETRIES, last_error
+    )
+    return None
+
+
+async def _backoff(attempt: int) -> None:
+    """Sleep with linear backoff between retries (skipped on the last attempt)."""
+    if attempt < MAX_RETRIES:
+        await asyncio.sleep(RETRY_BACKOFF_SECONDS * attempt)
+
+
+async def search_history(hass: HomeAssistant, conf: dict, call: ServiceCall) -> None:
     """Handle the service call for rag_search.search_history."""
-    conf = config[DOMAIN]
-    openai_model = conf.get("openai_model", "gpt-4-turbo")
-    openai_api_key = conf.get("openai_api_key", None)
-    max_items = conf.get("max_items", 50)
+    openai_model = conf.get(CONF_OPENAI_MODEL, DEFAULT_MODEL)
+    openai_api_key = conf.get(CONF_OPENAI_API_KEY)
+    max_items = conf.get(CONF_MAX_ITEMS, DEFAULT_MAX_ITEMS)
     session = hass.data[DOMAIN]["session"]
 
-    # Extract start_time and end_time safely
     start_time_str = call.data.get("start_time")
     end_time_str = call.data.get("end_time")
-
     if not start_time_str or not end_time_str:
         _LOGGER.error("Both 'start_time' and 'end_time' must be provided.")
-        hass.states.async_set(
-            "rag_search.last_query_result", "Invalid time parameters."
-        )
+        hass.states.async_set(RESULT_ENTITY, "Invalid time parameters.")
         return
 
     try:
-        start_time = datetime.fromisoformat(start_time_str.replace("Z", "+00:00"))
-        end_time = datetime.fromisoformat(end_time_str.replace("Z", "+00:00"))
-    except ValueError as e:
-        _LOGGER.error("Invalid date format for start_time or end_time: %s", e)
-        hass.states.async_set("rag_search.last_query_result", "Invalid date format.")
+        start_time = _parse_iso(start_time_str)
+        end_time = _parse_iso(end_time_str)
+    except ValueError as err:
+        _LOGGER.error("Invalid date format for start_time or end_time: %s", err)
+        hass.states.async_set(RESULT_ENTITY, "Invalid date format.")
         return
 
-    entity_id = call.data.get("entity_id", None)
+    entity_id = call.data.get("entity_id")
     if isinstance(entity_id, list):
         entity_id = entity_id[0] if entity_id else None
 
-    num_items = call.data.get("num_items", max_items)
-    num_items = min(num_items, max_items)
+    num_items = min(call.data.get("num_items", max_items), max_items)
 
-    # Get history data from Home Assistant
     _LOGGER.debug(
-        "Fetching history from %s to %s for entity %s", start_time, end_time, entity_id
+        "Fetching history from %s to %s for entity %s",
+        start_time,
+        end_time,
+        entity_id,
     )
-    from homeassistant.components.recorder import get_instance
-
     history_data = await get_instance(hass).async_add_executor_job(
         history.get_significant_states, hass, start_time, end_time, [entity_id]
     )
 
-    history_entries = []
-    if entity_id in history_data:
-        entity_states = history_data[entity_id]
-        latest_entries = entity_states[-num_items:]  # Get the last num_items entries
-
-        for state in latest_entries:
-            entry = (
-                f"{state.entity_id} changed to {state.state} at {state.last_changed}"
-            )
-            history_entries.append(entry)
-
+    history_entries = _format_history(entity_id, history_data, num_items)
     _LOGGER.info("Collected %d history entries.", len(history_entries))
 
-    # Embed history data in a prompt and call OpenAI API
-    prompt = "\n".join(history_entries) + "\n\nUser Query: " + call.data.get("query")
+    prompt = (
+        "\n".join(history_entries) + "\n\nUser Query: " + str(call.data.get("query"))
+    )
     _LOGGER.debug("Generated prompt for OpenAI: %s", prompt)
 
-    headers = {
-        "Authorization": f"Bearer {openai_api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": openai_model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 150,
-    }
+    answer = await _call_openai(session, openai_api_key, openai_model, prompt)
+    if answer is None:
+        hass.states.async_set(RESULT_ENTITY, "Error processing the query.")
+        return
 
-    try:
-        async with session.post(
-            "https://api.openai.com/v1/chat/completions",
-            json=payload,
-            headers=headers,
-            timeout=ClientTimeout(total=15),
-        ) as response:
-            if response.status != 200:
-                _LOGGER.error(
-                    "OpenAI API returned a non-200 status: %s", response.status
-                )
-                hass.states.async_set(
-                    "rag_search.last_query_result", "OpenAI API error."
-                )
-                return
-
-            response_data = await response.json()
-            _LOGGER.debug("Received response from OpenAI: %s", response_data)
-
-            if "choices" not in response_data or not response_data["choices"]:
-                _LOGGER.error("Invalid response from OpenAI: %s", response_data)
-                hass.states.async_set(
-                    "rag_search.last_query_result", "Invalid response from OpenAI."
-                )
-                return
-
-            answer = response_data["choices"][0]["message"]["content"].strip()
-            _LOGGER.info("Received response from OpenAI: %s", answer)
-            hass.states.async_set("rag_search.last_query_result", answer)
-
-    except aiohttp.ClientError as e:
-        _LOGGER.error("Error while calling OpenAI API: %s", e)
-        hass.states.async_set(
-            "rag_search.last_query_result", "Network error processing the query."
-        )
-    except Exception as e:
-        _LOGGER.error("Unexpected error: %s", e)
-        hass.states.async_set(
-            "rag_search.last_query_result", "Error processing the query."
-        )
+    _LOGGER.info("Received response from OpenAI: %s", answer)
+    hass.states.async_set(RESULT_ENTITY, answer)
