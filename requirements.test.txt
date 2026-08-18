@@ -1,3 +1,10 @@
 pytest
 pytest-cov
 pytest-homeassistant-custom-component
+aioresponses
+
+# Required to import homeassistant.components.recorder (used by search.py).
+# The recorder integration is never started in tests, but its module must import.
+SQLAlchemy
+fnv-hash-fast
+psutil-home-assistant
